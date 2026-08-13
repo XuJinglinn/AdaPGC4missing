@@ -72,7 +72,7 @@ def get_predictions_csv_path(exp_dir):
     return os.path.join(exp_dir, 'predictions.csv')
 
 def calculate_classification_metrics(logits, targets, n_class):
-    """Calculate aggregate and per-class single-label metrics as percentages."""
+    """Calculate aggregate single-label metrics as percentages."""
     logits = logits.detach().cpu().numpy() if hasattr(logits, 'detach') else np.asarray(logits)
     targets = targets.detach().cpu().numpy() if hasattr(targets, 'detach') else np.asarray(targets)
 
@@ -97,32 +97,33 @@ def calculate_classification_metrics(logits, targets, n_class):
             ) * 100.0
             for average in ('macro', 'micro', 'weighted')
         }
-        per_class = metric_function(
-            true_labels,
-            predicted_labels,
-            labels=class_labels,
-            average=None,
-            zero_division=0,
-        ) * 100.0
-        values['per_class'] = per_class.tolist()
         results[metric_name] = values
     return results
 
 def append_metric_results(metric_csv_paths, corruption, metric_results):
-    """Append metrics using result.csv's headerless ``name,value`` layout."""
+    """Write one aggregate-metric row per corruption, replacing duplicates."""
+    header = ['', 'macro', 'micro', 'weighted']
     for metric_name, csv_path in metric_csv_paths.items():
         values = metric_results[metric_name]
-        rows = [
-            [f'{corruption}_macro', f"{values['macro']:.2f}"],
-            [f'{corruption}_micro', f"{values['micro']:.2f}"],
-            [f'{corruption}_weighted', f"{values['weighted']:.2f}"],
+        new_row = [
+            corruption,
+            f"{values['macro']:.2f}",
+            f"{values['micro']:.2f}",
+            f"{values['weighted']:.2f}",
         ]
-        rows.extend(
-            [f'{corruption}_class_{class_index}', f'{value:.2f}']
-            for class_index, value in enumerate(values['per_class'])
-        )
-        with open(csv_path, 'a', encoding='utf-8', newline='') as csv_file:
-            csv.writer(csv_file).writerows(rows)
+
+        rows = []
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            with open(csv_path, 'r', encoding='utf-8', newline='') as csv_file:
+                existing_rows = list(csv.reader(csv_file))
+            if existing_rows and existing_rows[0] == header:
+                rows = [row for row in existing_rows[1:] if row and row[0] != corruption]
+
+        rows.append(new_row)
+        with open(csv_path, 'w', encoding='utf-8', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(header)
+            writer.writerows(rows)
 
 def get_audio_sample_names(dataset, sample_indices):
     """Resolve shuffled DataLoader indices back to extension-free audio names."""
