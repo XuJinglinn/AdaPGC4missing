@@ -66,6 +66,8 @@ save_commit_hash(exp_dir)
 backup_dir = get_backup_code_path(exp_dir)
 backup_files(backup_dir)
 result_csv = get_result_csv_path(exp_dir)
+metric_csv_paths = get_metric_csv_paths(exp_dir)
+predictions_csv = get_predictions_csv_path(exp_dir)
 save_args(args, exp_dir)
 
 
@@ -177,8 +179,10 @@ for corruption in corruption_list:
             val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                               'mode': 'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
            
+            tta_dataset = dataloader.AudiosetDataset(
+                data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, rt_idx=True)
             tta_loader = torch.utils.data.DataLoader(
-                dataloader.AudiosetDataset(data_val, label_csv=args.label_csv, audio_conf=val_audio_conf),
+                tta_dataset,
                 batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=False)
 
             if args.model == 'cav-mae-ft':
@@ -235,11 +239,27 @@ for corruption in corruption_list:
                     for epoch in range(1):
                         data_bar = tqdm(tta_loader)
                         batch_accs = []
+                        epoch_logits = []
+                        epoch_targets = []
 
-                        for i, (a_input, v_input, labels) in enumerate(data_bar):
+                        for i, (a_input, v_input, labels, sample_indices) in enumerate(data_bar):
                             a_input = a_input.to(device)
                             v_input = v_input.to(device)
                             outputs, loss = hsic_model((a_input, v_input), adapt_flag=adapt_flag)  # now it infers and adapts!
+                            final_logits = outputs[1].detach().cpu()
+                            batch_targets = labels.detach().cpu()
+                            sample_names = get_audio_sample_names(tta_dataset, sample_indices)
+                            append_prediction_results(
+                                predictions_csv,
+                                corruption,
+                                severity,
+                                epoch,
+                                sample_names,
+                                final_logits,
+                                batch_targets,
+                            )
+                            epoch_logits.append(final_logits)
+                            epoch_targets.append(batch_targets)
 
                             # if args.save_feat_path != 'None':
                             #     save_dir = os.path.join(args.save_feat_path, args.dataset, args.corruption_modality,corruption)
@@ -256,6 +276,12 @@ for corruption in corruption_list:
 
                         epoch_acc = round(sum(batch_accs) / len(batch_accs), 2)
                         epoch_accs.append(epoch_acc)
+                        metric_results = calculate_classification_metrics(
+                            torch.cat(epoch_logits, dim=0),
+                            torch.cat(epoch_targets, dim=0),
+                            args.n_class,
+                        )
+                        append_metric_results(metric_csv_paths, corruption, metric_results)
                         
                         print('Epoch{}: all acc is {}'.format(epoch, epoch_acc))
 

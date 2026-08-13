@@ -4,6 +4,10 @@ from datetime import datetime, timedelta
 import sys
 import shutil
 import json
+import csv
+
+import numpy as np
+from sklearn import metrics as sklearn_metrics
 
 
 def get_time_prefix():
@@ -16,7 +20,16 @@ def init_experiment_dir(log_dir, exp_name):
     os.makedirs(exp_dir, exist_ok=True)
     backup_code_dir = os.path.join(exp_dir, 'backup')
     os.makedirs(backup_code_dir, exist_ok=True)
-    files = ['output.log', 'result.csv', 'commit_hash.txt', 'remark.md']
+    files = [
+        'output.log',
+        'result.csv',
+        'precision.csv',
+        'recall.csv',
+        'f1.csv',
+        'predictions.csv',
+        'commit_hash.txt',
+        'remark.md',
+    ]
     for f in files:
         file_path = os.path.join(exp_dir, f)
         if not os.path.exists(file_path):
@@ -48,11 +61,114 @@ def redirect_output_to_log(log_path):
 def get_result_csv_path(exp_dir):
     return os.path.join(exp_dir, 'result.csv')
 
+def get_metric_csv_paths(exp_dir):
+    return {
+        'precision': os.path.join(exp_dir, 'precision.csv'),
+        'recall': os.path.join(exp_dir, 'recall.csv'),
+        'f1': os.path.join(exp_dir, 'f1.csv'),
+    }
+
+def get_predictions_csv_path(exp_dir):
+    return os.path.join(exp_dir, 'predictions.csv')
+
+def calculate_classification_metrics(logits, targets, n_class):
+    """Calculate aggregate and per-class single-label metrics as percentages."""
+    logits = logits.detach().cpu().numpy() if hasattr(logits, 'detach') else np.asarray(logits)
+    targets = targets.detach().cpu().numpy() if hasattr(targets, 'detach') else np.asarray(targets)
+
+    predicted_labels = np.argmax(logits, axis=1)
+    true_labels = np.argmax(targets, axis=1) if targets.ndim > 1 else targets.astype(int)
+    class_labels = np.arange(n_class)
+    metric_functions = {
+        'precision': sklearn_metrics.precision_score,
+        'recall': sklearn_metrics.recall_score,
+        'f1': sklearn_metrics.f1_score,
+    }
+
+    results = {}
+    for metric_name, metric_function in metric_functions.items():
+        values = {
+            average: metric_function(
+                true_labels,
+                predicted_labels,
+                labels=class_labels,
+                average=average,
+                zero_division=0,
+            ) * 100.0
+            for average in ('macro', 'micro', 'weighted')
+        }
+        per_class = metric_function(
+            true_labels,
+            predicted_labels,
+            labels=class_labels,
+            average=None,
+            zero_division=0,
+        ) * 100.0
+        values['per_class'] = per_class.tolist()
+        results[metric_name] = values
+    return results
+
+def append_metric_results(metric_csv_paths, corruption, metric_results):
+    """Append metrics using result.csv's headerless ``name,value`` layout."""
+    for metric_name, csv_path in metric_csv_paths.items():
+        values = metric_results[metric_name]
+        rows = [
+            [f'{corruption}_macro', f"{values['macro']:.2f}"],
+            [f'{corruption}_micro', f"{values['micro']:.2f}"],
+            [f'{corruption}_weighted', f"{values['weighted']:.2f}"],
+        ]
+        rows.extend(
+            [f'{corruption}_class_{class_index}', f'{value:.2f}']
+            for class_index, value in enumerate(values['per_class'])
+        )
+        with open(csv_path, 'a', encoding='utf-8', newline='') as csv_file:
+            csv.writer(csv_file).writerows(rows)
+
+def get_audio_sample_names(dataset, sample_indices):
+    """Resolve shuffled DataLoader indices back to extension-free audio names."""
+    if hasattr(sample_indices, 'detach'):
+        sample_indices = sample_indices.detach().cpu().tolist()
+    names = []
+    for sample_index in sample_indices:
+        datum = dataset.decode_data(dataset.data[int(sample_index)])
+        names.append(os.path.splitext(os.path.basename(datum['wav']))[0])
+    return names
+
+def append_prediction_results(
+        predictions_csv, corruption, severity, epoch, sample_names, logits, targets):
+    """Append one CSV row for every prediction, retaining the complete logits."""
+    logits = logits.detach().cpu().numpy() if hasattr(logits, 'detach') else np.asarray(logits)
+    targets = targets.detach().cpu().numpy() if hasattr(targets, 'detach') else np.asarray(targets)
+    true_labels = np.argmax(targets, axis=1) if targets.ndim > 1 else targets.astype(int)
+    write_header = not os.path.exists(predictions_csv) or os.path.getsize(predictions_csv) == 0
+
+    with open(predictions_csv, 'a', encoding='utf-8', newline='') as csv_file:
+        writer = csv.writer(csv_file)
+        if write_header:
+            writer.writerow(['corruption', 'severity', 'epoch', 'sample_name', 'logits', 'true_label'])
+        for sample_name, sample_logits, true_label in zip(sample_names, logits, true_labels):
+            writer.writerow([
+                corruption,
+                severity,
+                epoch,
+                sample_name,
+                json.dumps(sample_logits.tolist(), separators=(',', ':')),
+                int(true_label),
+            ])
+
 def get_backup_code_path(exp_dir):
     return os.path.join(exp_dir, 'backup')
 
 def backup_files(target_dir):
-    file_list = ['run_adapgc.py', 'TTA/ADAPGC.py', 'models/cav_mae.py', 'dataloader.py']
+    file_list = [
+        'run_adapgc.py',
+        'run_diag_adapgc.py',
+        'TTA/ADAPGC.py',
+        'TTA/ADAPGC_diag.py',
+        'models/cav_mae.py',
+        'dataloader.py',
+        'utilities/exp.py',
+    ]
     os.makedirs(target_dir, exist_ok=True)
     for file_path in file_list:
         if os.path.exists(file_path):
@@ -85,4 +201,3 @@ class Logger:
 
     def close(self):
         self.log.close()
-
