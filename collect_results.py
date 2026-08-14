@@ -13,7 +13,6 @@ METRIC_FILES = {
     "recall": "recall.csv",
     "f1": "f1.csv",
 }
-AVERAGES = ("macro", "micro", "weighted")
 
 
 def get_first_non_empty_line(file_path):
@@ -48,8 +47,8 @@ def _read_accuracy(file_path):
     return values
 
 
-def _read_aggregate_metric(file_path):
-    """Read precision/recall/F1 CSV and flatten its corruption/average columns."""
+def _read_macro_metric(file_path):
+    """Read only the macro column from a precision/recall/F1 CSV."""
     table = pd.read_csv(file_path)
     if table.empty:
         raise ValueError("no metric rows found")
@@ -59,9 +58,8 @@ def _read_aggregate_metric(file_path):
     normalized_columns = {
         str(column).strip().lower(): column for column in table.columns[1:]
     }
-    missing = [average for average in AVERAGES if average not in normalized_columns]
-    if missing:
-        raise ValueError(f"missing columns: {', '.join(missing)}")
+    if "macro" not in normalized_columns:
+        raise ValueError("missing column: macro")
 
     values = {}
     for _, row in table.iterrows():
@@ -69,8 +67,7 @@ def _read_aggregate_metric(file_path):
         if pd.isna(corruption):
             continue
         corruption = str(corruption).strip()
-        for average in AVERAGES:
-            values[f"{corruption}_{average}"] = row[normalized_columns[average]]
+        values[corruption] = row[normalized_columns["macro"]]
     if not values:
         raise ValueError("no metric rows found")
     return values
@@ -79,7 +76,7 @@ def _read_aggregate_metric(file_path):
 def _read_metric(metric_name, file_path):
     if metric_name == "accuracy":
         return _read_accuracy(file_path)
-    return _read_aggregate_metric(file_path)
+    return _read_macro_metric(file_path)
 
 
 def collect_and_group_results(root="exp_logs", out_dir="collected_results"):
@@ -89,8 +86,8 @@ def collect_and_group_results(root="exp_logs", out_dir="collected_results"):
 
         collected_results/<metric>/results_<dataset>_<modality>.csv
 
-    Accuracy columns are named by corruption. Precision, recall, and F1 columns
-    are named ``<corruption>_<average>`` for macro, micro, and weighted values.
+    All metric columns are named by corruption. Precision, recall, and F1 only
+    collect the macro value from each source CSV.
     """
     if not os.path.isdir(root):
         raise FileNotFoundError(f"experiment root does not exist: {root}")
