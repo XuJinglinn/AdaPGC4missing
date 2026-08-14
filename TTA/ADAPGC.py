@@ -600,7 +600,9 @@ def recovery_uncertainty_penalty(cross_stats, gmm_x, gmm_f, source):
 
 
 @torch.no_grad()
-def predict_x2f(cross_stats, gmm_x, gmm_f, f_x, source, temp=20, warmup=50, device=None):
+def predict_x2f(
+        cross_stats, gmm_x, gmm_f, f_x, source, temp=20, warmup=50,
+        device=None, return_record=False):
     """
     Uncertainty-aware prediction for missing-modality samples.
 
@@ -626,6 +628,14 @@ def predict_x2f(cross_stats, gmm_x, gmm_f, f_x, source, temp=20, warmup=50, devi
         logits_x = gmm_x.predict_batch(f_x, device=device)
         if device_out is not None:
             logits_x = logits_x.to(device_out)
+        if return_record:
+            return logits_x, {
+                'source': source,
+                'warmup_fallback': True,
+                'alpha': None,
+                'cond_means': None,
+                'predict_x2f_output': logits_x.detach().cpu(),
+            }
         return logits_x
 
     # ---------------------------------------------------------
@@ -681,6 +691,14 @@ def predict_x2f(cross_stats, gmm_x, gmm_f, f_x, source, temp=20, warmup=50, devi
     if device_out is not None:
         logits = logits.to(device_out)
 
+    if return_record:
+        return logits, {
+            'source': source,
+            'warmup_fallback': False,
+            'alpha': alpha_x.detach().cpu(),
+            'cond_means': cond_means.detach().cpu(),
+            'predict_x2f_output': logits.detach().cpu(),
+        }
     return logits
 
 
@@ -879,19 +897,30 @@ class ADAPGC(nn.Module):
         print('len:', len(ln_params))
         self.ln_optimizer = torch.optim.Adam([{'params': ln_params, 'lr': 1e-4}], weight_decay=0., betas=(0.9, 0.999))
 
-    def forward(self, x, adapt_flag):
+    def forward(self, x, adapt_flag, return_records=False):
+        records = None
         for _ in range(self.steps):
             if adapt_flag:
-                outputs, loss = forward_and_adapt(
-                    x, self.model, self.optimizer, self.args, self.scaler, self.ema, 
-                    self.gmm_f, self.gmm_a, self.gmm_v, self.cross_stats, self.ln_optimizer
-                )
+                if return_records:
+                    outputs, loss, records = forward_and_adapt(
+                        x, self.model, self.optimizer, self.args, self.scaler, self.ema,
+                        self.gmm_f, self.gmm_a, self.gmm_v, self.cross_stats,
+                        self.ln_optimizer, collect_records=True
+                    )
+                else:
+                    outputs, loss = forward_and_adapt(
+                        x, self.model, self.optimizer, self.args, self.scaler, self.ema,
+                        self.gmm_f, self.gmm_a, self.gmm_v, self.cross_stats,
+                        self.ln_optimizer
+                    )
                 # outputs, loss = forward_and_adapt(x, self.model, self.optimizer, self.args, self.scaler, self.ema, self.gmm_f, self.gmm_a, self.gmm_v, self.ln_optimizer)
             else:
                 outputs, _ = self.model.module.forward_eval(a=x[0], v=x[1], mode=self.args.testmode)
                 loss = (0, 0)
                 outputs = (outputs, outputs)
 
+        if return_records:
+            return outputs, loss, records
         return outputs, loss
     
     def delete_gmm(self):
@@ -910,7 +939,7 @@ def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
 def forward_and_adapt(
     x, model, optimizer, args, scaler, ema, 
-    gmm_f, gmm_a, gmm_v, cross_stats, ln_optimizer
+    gmm_f, gmm_a, gmm_v, cross_stats, ln_optimizer, collect_records=False
 ):
     """Forward and adapt model on batch of data.
     Compute loss function (Eq. 7) based on the model prediction, take gradients, and update params.
@@ -926,6 +955,23 @@ def forward_and_adapt(
         mask_full = mask['full']
         mask_audio = mask['audio_only']
         mask_video = mask['video_only']
+
+    records = None
+    recovery_records = []
+    if collect_records:
+        records = {
+            'forward_results': {
+                'logits': outputs.detach().cpu(),
+                'ca': None if ca is None else ca.detach().cpu(),
+                'cv': None if cv is None else cv.detach().cpu(),
+                'feat': feat.detach().cpu(),
+                'mask': {
+                    mask_name: mask_value.detach().cpu()
+                    for mask_name, mask_value in mask.items()
+                },
+            },
+            'predict_x2f': recovery_records,
+        }
 
     p_sum = outputs.softmax(dim=-1).sum(dim=0)
     loss_bal = - (p_sum.softmax(dim=0) * p_sum.log_softmax(dim=0)).sum()    
@@ -967,9 +1013,23 @@ def forward_and_adapt(
         # weight =  recovery_uncertainty_weight(gmm_a.cholesky_L, gmm_f.covariances_, cross_stats["Sigma_AF"], device_out=pred.device)
         # logits_gmm[mask_audio] = weight * predict_x2f(cross_stats=cross_stats, gmm_x=gmm_a, gmm_f=gmm_f, f_x=feat[mask_audio],
         #             source="a", temp=args.temp, device=pred.device,).float() + (1 - weight) * gmm_a.predict_batch(feat[mask_audio], device=pred.device)
-        logits_recovery = predict_x2f(cross_stats=cross_stats, gmm_x=gmm_a, gmm_f=gmm_f, f_x=feat[mask_audio],
-                    source="a", temp=args.temp, warmup=args.warmup_a, device=pred.device,).float()
+        if collect_records:
+            logits_recovery, recovery_record = predict_x2f(
+                cross_stats=cross_stats, gmm_x=gmm_a, gmm_f=gmm_f,
+                f_x=feat[mask_audio], source="a", temp=args.temp,
+                warmup=args.warmup_a, device=pred.device, return_record=True,
+            )
+            recovery_records.append(recovery_record)
+            logits_recovery = logits_recovery.float()
+        else:
+            logits_recovery = predict_x2f(
+                cross_stats=cross_stats, gmm_x=gmm_a, gmm_f=gmm_f,
+                f_x=feat[mask_audio], source="a", temp=args.temp,
+                warmup=args.warmup_a, device=pred.device,
+            ).float()
         logits_gda = gmm_a.predict_batch(feat[mask_audio], device=pred.device)
+        if collect_records:
+            recovery_record['logits_gda'] = logits_gda.detach().cpu()
         logits_gmm[mask_audio] = (1 - args.beta) * logits_recovery + args.beta * logits_gda
         # logits_gmm[mask_audio] = (1 - args.beta) * predict_x2f(cross_stats=cross_stats, gmm_x=gmm_a, gmm_f=gmm_f, f_x=feat[mask_audio],
         #             source="a", temp=args.temp, warmup=args.warmup_a, device=pred.device,).float() + args.beta * gmm_a.predict_batch(feat[mask_audio], device=pred.device)
@@ -978,9 +1038,23 @@ def forward_and_adapt(
         # weight =  recovery_uncertainty_weight(gmm_v.cholesky_L, gmm_f.covariances_, cross_stats["Sigma_VF"], pred.device)
         # logits_gmm[mask_video] = weight * predict_x2f(cross_stats=cross_stats, gmm_x=gmm_v, gmm_f=gmm_f, f_x=feat[mask_video],
         #             source="v", temp=args.temp, device=pred.device,).float() + (1 - weight) * gmm_v.predict_batch(feat[mask_video], device=pred.device)
-        logits_recovery = predict_x2f(cross_stats=cross_stats, gmm_x=gmm_v, gmm_f=gmm_f, f_x=feat[mask_video],
-                    source="v", temp=args.temp, warmup=args.warmup_v, device=pred.device,).float() 
+        if collect_records:
+            logits_recovery, recovery_record = predict_x2f(
+                cross_stats=cross_stats, gmm_x=gmm_v, gmm_f=gmm_f,
+                f_x=feat[mask_video], source="v", temp=args.temp,
+                warmup=args.warmup_v, device=pred.device, return_record=True,
+            )
+            recovery_records.append(recovery_record)
+            logits_recovery = logits_recovery.float()
+        else:
+            logits_recovery = predict_x2f(
+                cross_stats=cross_stats, gmm_x=gmm_v, gmm_f=gmm_f,
+                f_x=feat[mask_video], source="v", temp=args.temp,
+                warmup=args.warmup_v, device=pred.device,
+            ).float()
         logits_gda = gmm_v.predict_batch(feat[mask_video], device=pred.device)
+        if collect_records:
+            recovery_record['logits_gda'] = logits_gda.detach().cpu()
         logits_gmm[mask_video] = (1 - args.beta) * logits_recovery + args.beta * logits_gda
         # logits_gmm[mask_video] = (1 - args.beta) * predict_x2f(cross_stats=cross_stats, gmm_x=gmm_v, gmm_f=gmm_f, f_x=feat[mask_video],
         #     source="v", temp=args.temp, warmup=args.warmup_v, device=pred.device,).float() + args.beta * gmm_v.predict_batch(feat[mask_video], device=pred.device)
@@ -1063,6 +1137,8 @@ def forward_and_adapt(
             outputs2 += args.gamma * logits_gmm
     ema.restore()
 
+    if collect_records:
+        return (outputs, outputs2), (loss_ra.item(), loss_bal.item()), records
     return (outputs, outputs2), (loss_ra.item(), loss_bal.item())
 
 

@@ -72,6 +72,7 @@ backup_files(backup_dir)
 result_csv = get_result_csv_path(exp_dir)
 metric_csv_paths = get_metric_csv_paths(exp_dir)
 predictions_csv = get_predictions_csv_path(exp_dir)
+recovered_features_records_dir = get_recovered_features_records_dir(exp_dir)
 save_args(args, exp_dir)
 
 
@@ -252,10 +253,21 @@ for corruption in corruption_list:
                         for i, (a_input, v_input, labels, sample_indices) in enumerate(data_bar):
                             a_input = a_input.to(device)
                             v_input = v_input.to(device)
-                            outputs, loss = hsic_model((a_input, v_input), adapt_flag=adapt_flag)  # now it infers and adapts!
+                            sample_names = get_audio_sample_names(tta_dataset, sample_indices)
+                            outputs, loss, recovered_records = hsic_model(
+                                (a_input, v_input),
+                                adapt_flag=adapt_flag,
+                                return_records=True,
+                            )  # now it infers and adapts!
+                            save_recovered_features_records(
+                                recovered_features_records_dir,
+                                corruption,
+                                i,
+                                sample_names,
+                                recovered_records,
+                            )
                             final_logits = outputs[1].detach().cpu()
                             batch_targets = labels.detach().cpu()
-                            sample_names = get_audio_sample_names(tta_dataset, sample_indices)
                             append_prediction_results(
                                 predictions_csv,
                                 corruption,

@@ -7,6 +7,7 @@ import json
 import csv
 
 import numpy as np
+import torch
 from sklearn import metrics as sklearn_metrics
 
 
@@ -70,6 +71,11 @@ def get_metric_csv_paths(exp_dir):
 
 def get_predictions_csv_path(exp_dir):
     return os.path.join(exp_dir, 'predictions.csv')
+
+def get_recovered_features_records_dir(exp_dir):
+    records_dir = os.path.join(exp_dir, 'recovered_features_records')
+    os.makedirs(records_dir, exist_ok=True)
+    return records_dir
 
 def calculate_classification_metrics(logits, targets, n_class):
     """Calculate aggregate single-label metrics as percentages."""
@@ -156,6 +162,145 @@ def append_prediction_results(
                 json.dumps(sample_logits.tolist(), separators=(',', ':')),
                 int(true_label),
             ])
+
+def save_recovered_features_records(
+        records_dir, corruption, batch_index, sample_names, records):
+    """Save forward features and each predict_x2f trace for one test batch."""
+    if records is None:
+        return
+
+    sample_names = list(sample_names)
+    forward_results = records['forward_results']
+    batch_size = int(forward_results['logits'].shape[0])
+    if len(sample_names) != batch_size:
+        raise ValueError(
+            f'Expected {batch_size} sample names, but received {len(sample_names)}.'
+        )
+    if int(forward_results['feat'].shape[0]) != batch_size:
+        raise ValueError('The first dimension of feat does not match logits.')
+    for mask_name, mask_value in forward_results['mask'].items():
+        if int(mask_value.shape[0]) != batch_size:
+            raise ValueError(
+                f'The {mask_name} mask does not match the forward batch size.'
+            )
+
+    corruption_dir = os.path.join(records_dir, corruption)
+    os.makedirs(corruption_dir, exist_ok=True)
+
+    full_mask = forward_results['mask']['full'].bool().tolist()
+    full_sample_names = [
+        sample_name
+        for sample_name, is_full in zip(sample_names, full_mask)
+        if is_full
+    ]
+    num_full_samples = len(full_sample_names)
+    for feature_name in ('ca', 'cv'):
+        feature_value = forward_results[feature_name]
+        if feature_value is None:
+            if num_full_samples != 0:
+                raise ValueError(
+                    f'{feature_name} is None for {num_full_samples} full samples.'
+                )
+        elif int(feature_value.shape[0]) != num_full_samples:
+            raise ValueError(
+                f'{feature_name} contains {feature_value.shape[0]} samples, but '
+                f'the full mask selects {num_full_samples}.'
+            )
+    forward_payload = {
+        'sample_names': sample_names,
+        'logits': forward_results['logits'],
+        'ca': forward_results['ca'],
+        'cv': forward_results['cv'],
+        'feat': forward_results['feat'],
+        'mask': forward_results['mask'],
+        'full_sample_names': full_sample_names,
+    }
+    forward_filename = f'batch_{batch_index:05d}_forward_results.pt'
+    forward_path = os.path.join(corruption_dir, forward_filename)
+    torch.save(forward_payload, forward_path)
+
+    index_rows = [[
+        corruption,
+        batch_index,
+        'forward_results',
+        'all',
+        batch_size,
+        '',
+        os.path.relpath(forward_path, records_dir).replace(os.sep, '/'),
+    ]]
+
+    for recovery_record in records['predict_x2f']:
+        source = recovery_record['source']
+        if source == 'a':
+            mask_key = 'audio_only'
+            observed_modality = 'audio'
+            missing_modality = 'video'
+        elif source == 'v':
+            mask_key = 'video_only'
+            observed_modality = 'video'
+            missing_modality = 'audio'
+        else:
+            raise ValueError(f'Unsupported predict_x2f source: {source}')
+
+        source_mask = forward_results['mask'][mask_key].bool().tolist()
+        recovered_sample_names = [
+            sample_name
+            for sample_name, selected in zip(sample_names, source_mask)
+            if selected
+        ]
+        num_samples = int(recovery_record['predict_x2f_output'].shape[0])
+        if len(recovered_sample_names) != num_samples:
+            raise ValueError(
+                f'{source} predict_x2f returned {num_samples} samples, but its '
+                f'mask selected {len(recovered_sample_names)} sample names.'
+            )
+        for value_name in ('alpha', 'cond_means', 'logits_gda'):
+            value = recovery_record[value_name]
+            if value is not None and int(value.shape[0]) != num_samples:
+                raise ValueError(
+                    f'{source} {value_name} contains {value.shape[0]} samples, '
+                    f'but predict_x2f_output contains {num_samples}.'
+                )
+
+        recovery_payload = {
+            'sample_names': recovered_sample_names,
+            'source': source,
+            'observed_modality': observed_modality,
+            'missing_modality': missing_modality,
+            'warmup_fallback': recovery_record['warmup_fallback'],
+            'alpha': recovery_record['alpha'],
+            'cond_means': recovery_record['cond_means'],
+            'predict_x2f_output': recovery_record['predict_x2f_output'],
+            'logits_gda': recovery_record['logits_gda'],
+        }
+        recovery_filename = f'batch_{batch_index:05d}_x2f_{source}.pt'
+        recovery_path = os.path.join(corruption_dir, recovery_filename)
+        torch.save(recovery_payload, recovery_path)
+        index_rows.append([
+            corruption,
+            batch_index,
+            'predict_x2f',
+            source,
+            num_samples,
+            recovery_record['warmup_fallback'],
+            os.path.relpath(recovery_path, records_dir).replace(os.sep, '/'),
+        ])
+
+    index_path = os.path.join(records_dir, 'index.csv')
+    write_header = not os.path.exists(index_path) or os.path.getsize(index_path) == 0
+    with open(index_path, 'a', encoding='utf-8', newline='') as csv_file:
+        writer = csv.writer(csv_file)
+        if write_header:
+            writer.writerow([
+                'corruption',
+                'batch_index',
+                'record_type',
+                'source',
+                'num_samples',
+                'warmup_fallback',
+                'file',
+            ])
+        writer.writerows(index_rows)
 
 def get_backup_code_path(exp_dir):
     return os.path.join(exp_dir, 'backup')
