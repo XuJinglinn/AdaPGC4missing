@@ -39,6 +39,11 @@ parser.add_argument('--corruption-modality', type=str, default='video', choices=
 parser.add_argument('--severity-start', type=int, default=5, help='the start severity of the corruption')
 parser.add_argument('--severity-end', type=int, default=5, help='the end severity of the corruption')
 parser.add_argument('--save-feat-path', type=str, default='None', help='the path to save the features extracted by the model during TTA')
+parser.add_argument(
+    '--save-recovered-features-records',
+    action='store_true',
+    help='save forward results and predict_x2f intermediate tensors',
+)
 parser.add_argument('--log-dir', type=str, default='exp_logs', help='the directory to save the logs')
 parser.add_argument('--exp-name', type=str, help='the output json file to save the results')
 parser.add_argument('--remark', type=str, default='', help='remark for the experiment')
@@ -72,7 +77,11 @@ backup_files(backup_dir)
 result_csv = get_result_csv_path(exp_dir)
 metric_csv_paths = get_metric_csv_paths(exp_dir)
 predictions_csv = get_predictions_csv_path(exp_dir)
-recovered_features_records_dir = get_recovered_features_records_dir(exp_dir)
+recovered_features_records_dir = (
+    get_recovered_features_records_dir(exp_dir)
+    if args.save_recovered_features_records
+    else None
+)
 save_args(args, exp_dir)
 
 
@@ -254,18 +263,22 @@ for corruption in corruption_list:
                             a_input = a_input.to(device)
                             v_input = v_input.to(device)
                             sample_names = get_audio_sample_names(tta_dataset, sample_indices)
-                            outputs, loss, recovered_records = hsic_model(
+                            model_result = hsic_model(
                                 (a_input, v_input),
                                 adapt_flag=adapt_flag,
-                                return_records=True,
+                                return_records=args.save_recovered_features_records,
                             )  # now it infers and adapts!
-                            save_recovered_features_records(
-                                recovered_features_records_dir,
-                                corruption,
-                                i,
-                                sample_names,
-                                recovered_records,
-                            )
+                            if args.save_recovered_features_records:
+                                outputs, loss, recovered_records = model_result
+                                save_recovered_features_records(
+                                    recovered_features_records_dir,
+                                    corruption,
+                                    i,
+                                    sample_names,
+                                    recovered_records,
+                                )
+                            else:
+                                outputs, loss = model_result
                             final_logits = outputs[1].detach().cpu()
                             batch_targets = labels.detach().cpu()
                             append_prediction_results(
