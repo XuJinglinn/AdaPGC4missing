@@ -78,8 +78,8 @@ missing samples:
    `video_only` mask;
 2. **Recovery:** the posterior mean derived from the missing experiment's
    `alpha` and `cond_means`;
-3. **Missing ground truth:** the clean experiment's modality-specific `ca` or
-   `cv` for the exact matched `sample_name`.
+3. **Clean fused ground truth:** the clean experiment's full-sample
+   `forward_results['feat']` for the exact matched `sample_name`.
 
 The recovery summary is:
 
@@ -91,10 +91,9 @@ It never uses the ground-truth class to choose a conditional feature. This mean
 is a faithful summary of the saved recovery distribution, but it is not a claim
 that the classifier directly consumes this vector: the archived implementation
 applies GDA to every class-conditional mean and then marginalizes those scores.
-Also note that `cond_means` lives in fused feature space `F`, while the requested
-missing ground truth is modality-specific `ca`/`cv`. The joint plot is therefore
-a geometry/alignment visualization; do not describe it as direct reconstruction
-of a modality-specific vector.
+Both the posterior-mean recovery and its clean ground truth represent fused
+feature space `F`. The available single-view feature is retained in the joint
+embedding as context.
 
 Audio missing, video observed:
 
@@ -124,7 +123,7 @@ The observed source (`v` for `missing_a_*`, `a` for `missing_v_*`) is inferred.
 Pass `--source a` or `--source v` only for nonstandard condition names.
 
 Representation type is encoded by color/fill, while class is encoded by marker
-shape. By default six faint recovery-to-missing-GT pair lines per class are
+shape. By default six faint recovery-to-clean-fused-GT pair lines per class are
 drawn. Disable them with:
 
 ```bash
@@ -146,8 +145,8 @@ python visualization/plot_feature_tsne.py alignment \
 ```
 
 This puts `ca`, `cv`, and full fused `feat` into one embedding. Keep it as a
-supplementary diagnostic; the exact available/recovered/missing-GT triplets are
-the direct visualization for the missing-modality analysis.
+supplementary diagnostic; the exact available/recovered/clean-fused-GT
+triplets are the direct visualization for the missing-modality analysis.
 
 ## Output contract
 
@@ -171,7 +170,7 @@ rendered legend and point density remain readable.
 - Do not select classes by the best visual separation. Automatic selection uses
   only common sample support; explicit choices are recorded in the manifest.
 - Do not interpret t-SNE distance as recovery error. The metrics CSV contains
-  recovery-to-missing-GT, available-to-missing-GT, and recovery-to-available
+  recovery-to-clean-fused-GT, available-to-clean-fused-GT, and recovery-to-available
   paired comparisons computed before t-SNE.
 - If one experiment contains several severities, pass `--severity`. The current
   record filenames do not encode severity and can be overwritten by later

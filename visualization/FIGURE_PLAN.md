@@ -46,13 +46,13 @@ use one canonical corruption from each stream and state the choice explicitly.
   the ground-truth label to select a conditional mean.
 - **Available:** The missing run's `feat` selected by `audio_only` or
   `video_only` mask.
-- **Reference:** Clean `ca` for missing audio or clean `cv` for missing video,
-  matched by the exact same `sample_name`.
+- **Reference:** The clean run's full-sample fused `feat`, matched by the exact
+  same `sample_name`.
 - **Default selection:** Four classes with the largest number of exact
-  available/recovered/missing-GT triplets; balanced sampling within class.
+  available/recovered/clean-fused-GT triplets; balanced sampling within class.
 - **Visual:** One joint t-SNE panel. Representation is encoded by explicit
   color/fill and class by marker shape. Only a small deterministic subset of
-  recovery-to-missing-GT pair lines is drawn.
+  recovery-to-clean-fused-GT pair lines is drawn.
 - **Quantitative guardrail:** paired cosine similarity, relative L2 error,
   reference-centroid agreement, and class-centroid displacement are computed
   before t-SNE for all three pairwise representation comparisons.
@@ -64,10 +64,9 @@ condition at the same missing ratio. The default recommendation is 0.70 when it
 was collected; generate one overlay for each missing direction rather than every
 missing ratio.
 
-**Semantic caveat:** `cond_means` predicts fused feature space `F`; clean
-missing-modality ground truth is modality-specific `ca`/`cv`. This plot supports
-a feature-geometry/alignment statement, not literal reconstruction of a saved
-modality-specific vector.
+Both `cond_means` and the clean reference represent fused feature space `F`.
+The available single-view feature remains in the joint embedding to show the
+observed starting representation.
 
 ## Supplementary Figure S1 — modality-to-fused geometry
 

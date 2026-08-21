@@ -1,5 +1,6 @@
 import csv
 import argparse
+import json
 import pickle
 import sys
 import tempfile
@@ -345,9 +346,29 @@ class EndToEndRenderTests(unittest.TestCase):
             point_rows = list(csv.DictReader(handle))
         self.assertEqual(
             {row["state"] for row in point_rows},
-            {"available", "recovered", "missing_ground_truth"},
+            {"available", "recovered", "clean_fused_ground_truth"},
         )
         self.assertEqual(len(point_rows), 3 * 4 * 14)
+
+        with (self.output / "qa_recovery_metrics.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            metric_rows = list(csv.DictReader(handle))
+        self.assertEqual(
+            {row["comparison"] for row in metric_rows},
+            {
+                "recovery_to_clean_fused_ground_truth",
+                "available_to_clean_fused_ground_truth",
+                "recovery_to_available",
+            },
+        )
+
+        with (self.output / "qa_recovery_manifest.json").open(
+            "r", encoding="utf-8"
+        ) as handle:
+            manifest = json.load(handle)
+        self.assertEqual(manifest["recovery_target_space"], "fused_F")
+        self.assertIn("forward_results.feat", manifest["clean_fused_ground_truth_feature"])
 
 
 if __name__ == "__main__":

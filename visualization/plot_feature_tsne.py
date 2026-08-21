@@ -830,21 +830,20 @@ def plot_recovery(args) -> Dict[str, str]:
         observed = "audio"
         missing = "video"
         available_mask = "audio_only"
-        missing_ground_truth_key = "Video"
     else:
         observed = "video"
         missing = "audio"
         available_mask = "video_only"
-        missing_ground_truth_key = "Audio"
 
     available = missing_store.load_forward(
         args.missing_corruption, mask_kind=available_mask
     )
     recovered = missing_store.load_recovered(args.missing_corruption, source)
-    clean_modalities = clean_store.load_full_modalities(args.clean_corruption)
-    missing_ground_truth = clean_modalities[missing_ground_truth_key]
+    clean_fused_ground_truth = clean_store.load_forward(
+        args.clean_corruption, full_only=True
+    )
     names, classes, counts = _common_balanced_names(
-        [available, recovered, missing_ground_truth],
+        [available, recovered, clean_fused_ground_truth],
         args.classes,
         args.n_classes,
         args.min_per_class,
@@ -852,21 +851,21 @@ def plot_recovery(args) -> Dict[str, str]:
     )
     available = available.take_names(names)
     recovered = recovered.take_names(names)
-    missing_ground_truth = missing_ground_truth.take_names(names)
+    clean_fused_ground_truth = clean_fused_ground_truth.take_names(names)
     coords, _, embedding_meta = _joint_embedding(
-        [available.features, recovered.features, missing_ground_truth.features],
+        [available.features, recovered.features, clean_fused_ground_truth.features],
         args.seed,
         args.pca_dim,
         args.perplexity,
     )
-    available_xy, recovered_xy, missing_ground_truth_xy = coords
+    available_xy, recovered_xy, clean_fused_ground_truth_xy = coords
     recovery_summary, recovery_per_class = _paired_representation_metrics(
-        missing_ground_truth.features, recovered.features,
-        missing_ground_truth.labels, classes
+        clean_fused_ground_truth.features, recovered.features,
+        clean_fused_ground_truth.labels, classes
     )
     available_summary, available_per_class = _paired_representation_metrics(
-        missing_ground_truth.features, available.features,
-        missing_ground_truth.labels, classes
+        clean_fused_ground_truth.features, available.features,
+        clean_fused_ground_truth.labels, classes
     )
     recovery_available_summary, recovery_available_per_class = (
         _paired_representation_metrics(
@@ -882,7 +881,7 @@ def plot_recovery(args) -> Dict[str, str]:
     state_colors = {
         "available": "#35618F",
         "recovered": "#D49A28",
-        "missing_ground_truth": "#D66B37",
+        "clean_fused_ground_truth": "#D66B37",
     }
     class_handles = []
     for class_index, class_id in enumerate(classes):
@@ -891,8 +890,14 @@ def plot_recovery(args) -> Dict[str, str]:
         class_indices = np.flatnonzero(mask)[: max(0, args.overlay_pairs_per_class)]
         for sample_index in class_indices:
             ax.plot(
-                [recovered_xy[sample_index, 0], missing_ground_truth_xy[sample_index, 0]],
-                [recovered_xy[sample_index, 1], missing_ground_truth_xy[sample_index, 1]],
+                [
+                    recovered_xy[sample_index, 0],
+                    clean_fused_ground_truth_xy[sample_index, 0],
+                ],
+                [
+                    recovered_xy[sample_index, 1],
+                    clean_fused_ground_truth_xy[sample_index, 1],
+                ],
                 color="#B8C0C8", linewidth=0.55, alpha=0.34, zorder=1,
             )
 
@@ -902,8 +907,10 @@ def plot_recovery(args) -> Dict[str, str]:
             edgecolors="white", linewidths=0.30, rasterized=True, zorder=2,
         )
         ax.scatter(
-            missing_ground_truth_xy[mask, 0], missing_ground_truth_xy[mask, 1], s=27,
-            c=state_colors["missing_ground_truth"], marker=marker, alpha=0.66,
+            clean_fused_ground_truth_xy[mask, 0],
+            clean_fused_ground_truth_xy[mask, 1],
+            s=27,
+            c=state_colors["clean_fused_ground_truth"], marker=marker, alpha=0.66,
             edgecolors="#7D3A22", linewidths=0.35, rasterized=True, zorder=3,
         )
         ax.scatter(
@@ -932,9 +939,9 @@ def plot_recovery(args) -> Dict[str, str]:
         ),
         deps["Line2D"](
             [0], [0], marker="o", linestyle="none",
-            markerfacecolor=state_colors["missing_ground_truth"],
+            markerfacecolor=state_colors["clean_fused_ground_truth"],
             markeredgecolor="#7D3A22", markersize=7,
-            label=f"Missing-modality ground truth ({missing})",
+            label="Clean fused ground truth (F)",
         ),
     ]
     representation_legend = fig.legend(
@@ -948,20 +955,21 @@ def plot_recovery(args) -> Dict[str, str]:
     )
     ax.text(
         0.02, 0.02,
-        f"Recovery ↔ missing GT median cosine "
+        f"Recovery ↔ clean fused GT median cosine "
         f"{recovery_summary['median_paired_cosine']:.3f}\n"
-        f"Missing-GT centroid agreement "
+        f"Clean-fused-GT centroid agreement "
         f"{recovery_summary['reference_centroid_agreement']:.3f}",
         transform=ax.transAxes, va="bottom", ha="left", fontsize=8,
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#CCD3DA", alpha=0.92),
     )
     fig.suptitle(
-        args.title or "Available, recovered, and missing-modality representations",
+        args.title or "Available, recovered, and clean fused representations",
                  fontweight="bold", y=0.985)
     fig.text(
         0.5, 0.935,
         f"{args.missing_corruption} | available {observed}, missing {missing} | "
-        f"joint embedding | {len(classes)} classes | {len(names)} exact sample triplets",
+        f"recovery target clean fused F | joint embedding | {len(classes)} classes | "
+        f"{len(names)} exact sample triplets",
         ha="center", va="top", fontsize=8.5, color="#5F6B76",
     )
 
@@ -973,7 +981,7 @@ def plot_recovery(args) -> Dict[str, str]:
     for state, role, coordinate in (
         ("available", f"observed_{observed}_only", available_xy),
         ("recovered", "posterior_mean_fused_F", recovered_xy),
-        ("missing_ground_truth", f"clean_{missing}_modality", missing_ground_truth_xy),
+        ("clean_fused_ground_truth", "clean_full_fused_F", clean_fused_ground_truth_xy),
     ):
         for sample_name, class_id, xy in zip(names, available.labels, coordinate):
             point_rows.append(
@@ -985,8 +993,8 @@ def plot_recovery(args) -> Dict[str, str]:
     _write_csv(output_dir / f"{name}_points.csv", point_rows)
     metric_rows: List[Dict[str, Any]] = []
     for comparison, summary, per_class in (
-        ("recovery_to_missing_ground_truth", recovery_summary, recovery_per_class),
-        ("available_to_missing_ground_truth", available_summary, available_per_class),
+        ("recovery_to_clean_fused_ground_truth", recovery_summary, recovery_per_class),
+        ("available_to_clean_fused_ground_truth", available_summary, available_per_class),
         ("recovery_to_available", recovery_available_summary, recovery_available_per_class),
     ):
         metric_rows.append({"comparison": comparison, "scope": "overall", **summary})
@@ -998,7 +1006,7 @@ def plot_recovery(args) -> Dict[str, str]:
     _write_json(
         output_dir / f"{name}_manifest.json",
         {
-            "figure": "available_recovery_missing_ground_truth_joint_embedding",
+            "figure": "available_recovery_clean_fused_ground_truth_joint_embedding",
             "clean_experiment": str(clean_store.exp_dir),
             "missing_experiment": str(missing_store.exp_dir),
             "clean_corruption": args.clean_corruption,
@@ -1007,21 +1015,24 @@ def plot_recovery(args) -> Dict[str, str]:
             "available_modality": observed,
             "available_mask": available_mask,
             "missing_modality": missing,
-            "missing_ground_truth_feature": (
-                f"clean forward_results.{missing_ground_truth_key.lower()} "
-                f"for the exact matched sample_name"
+            "available_feature": (
+                f"missing forward_results.feat filtered by mask.{available_mask}"
             ),
+            "clean_fused_ground_truth_feature": (
+                "clean forward_results.feat filtered by mask.full for the exact matched "
+                "sample_name"
+            ),
+            "recovery_target_space": "fused_F",
             "recovery_summary": "posterior mean of saved class-conditional recovered features",
             "recovery_formula": "einsum('bk,bkd->bd', alpha, cond_means)",
             "classifier_note": (
                 "The archived classifier marginalizes GDA scores evaluated at each conditional "
                 "mean; it does not directly classify this single posterior-mean vector."
             ),
-            "semantic_caveat": (
-                "The recovered vector is in fused feature space F, whereas missing-modality "
-                "ground truth is the clean modality-specific ca/cv representation. The joint "
-                "plot visualizes their geometry but must not be described as direct recovery "
-                "of a modality-specific vector."
+            "comparison_note": (
+                "Recovered and ground-truth vectors both represent fused feature F. The "
+                "available single-view feature is retained as context in the same joint "
+                "embedding."
             ),
             "warmup_samples_skipped": recovered.metadata["warmup_samples_skipped"],
             "selected_classes": classes,
@@ -1178,7 +1189,7 @@ def build_parser() -> argparse.ArgumentParser:
         "recovery",
         help=(
             "Jointly plot available, posterior-mean recovered, and exact "
-            "missing-modality ground-truth representations"
+            "clean fused ground-truth representations"
         ),
     )
     recovery.add_argument("--clean-exp", required=True)
@@ -1192,7 +1203,7 @@ def build_parser() -> argparse.ArgumentParser:
     recovery.add_argument(
         "--overlay-pairs-per-class", type=int, default=6,
         help=(
-            "draw this many faint recovery-to-missing-GT pair lines per class; "
+            "draw this many faint recovery-to-clean-fused-GT pair lines per class; "
             "use 0 to disable"
         ),
     )
