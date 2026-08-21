@@ -268,7 +268,18 @@ class ExperimentRecords:
             )
         return self.predictions[key]
 
-    def load_forward(self, corruption: str, full_only: bool = False) -> FeatureTable:
+    def load_forward(
+        self,
+        corruption: str,
+        full_only: bool = False,
+        mask_kind: Optional[str] = None,
+    ) -> FeatureTable:
+        if full_only and mask_kind is not None:
+            raise ValueError("Use either full_only=True or mask_kind, not both")
+        if mask_kind is not None and mask_kind not in {
+            "full", "audio_only", "video_only", "both_missing"
+        }:
+            raise ValueError(f"Unsupported modality mask: {mask_kind!r}")
         names: List[str] = []
         labels: List[int] = []
         arrays: List[np.ndarray] = []
@@ -294,7 +305,12 @@ class ExperimentRecords:
             membership = sum(mask.astype(np.int8) for mask in bool_masks.values())
             if not np.all(membership == 1):
                 raise ValueError(f"{path}: modality masks are not mutually exclusive and exhaustive")
-            keep = bool_masks["full"] if full_only else np.ones(len(batch_names), dtype=bool)
+            if mask_kind is not None:
+                keep = bool_masks[mask_kind]
+            elif full_only:
+                keep = bool_masks["full"]
+            else:
+                keep = np.ones(len(batch_names), dtype=bool)
             for index in np.flatnonzero(keep):
                 sample_name = batch_names[index]
                 names.append(sample_name)
@@ -309,6 +325,7 @@ class ExperimentRecords:
                 "experiment": str(self.exp_dir),
                 "corruption": corruption,
                 "feature_kind": "feat",
+                "selected_mask_kind": mask_kind or ("full" if full_only else "all"),
                 "mask_kinds": mask_kinds,
                 "source_files": [str(path) for path in source_files],
             },
@@ -562,36 +579,51 @@ def _separation_metrics(features: np.ndarray, labels: np.ndarray, seed: int) -> 
     }
 
 
-def _recovery_metrics(
-    clean: np.ndarray, recovered: np.ndarray, labels: np.ndarray, classes: Sequence[int]
+def _paired_representation_metrics(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    labels: np.ndarray,
+    classes: Sequence[int],
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
-    clean_norm = _l2_normalize(clean)
-    recovered_norm = _l2_normalize(recovered)
-    cosine = np.sum(clean_norm * recovered_norm, axis=1)
-    relative_l2 = np.linalg.norm(recovered - clean, axis=1) / np.maximum(
-        np.linalg.norm(clean, axis=1), 1e-12
+    reference_norm = _l2_normalize(reference)
+    candidate_norm = _l2_normalize(candidate)
+    cosine = np.sum(reference_norm * candidate_norm, axis=1)
+    relative_l2 = np.linalg.norm(candidate - reference, axis=1) / np.maximum(
+        np.linalg.norm(reference, axis=1), 1e-12
     )
-    clean_centroids = np.stack([clean_norm[labels == value].mean(axis=0) for value in classes])
-    clean_centroids = _l2_normalize(clean_centroids)
-    centroid_predictions = np.asarray(classes)[np.argmax(recovered_norm @ clean_centroids.T, axis=1)]
+    reference_centroids = np.stack(
+        [reference_norm[labels == value].mean(axis=0) for value in classes]
+    )
+    reference_centroids = _l2_normalize(reference_centroids)
+    centroid_predictions = np.asarray(classes)[
+        np.argmax(candidate_norm @ reference_centroids.T, axis=1)
+    ]
     agreement = float(np.mean(centroid_predictions == labels))
     per_class: List[Dict[str, Any]] = []
     for class_id in classes:
         mask = labels == class_id
-        clean_class = clean_norm[mask]
-        recovered_class = recovered_norm[mask]
-        clean_centroid = _l2_normalize(clean_class.mean(axis=0, keepdims=True))[0]
-        recovered_centroid = _l2_normalize(recovered_class.mean(axis=0, keepdims=True))[0]
-        within_radius = np.median(np.linalg.norm(clean_class - clean_centroid, axis=1))
-        displacement = np.linalg.norm(recovered_centroid - clean_centroid)
+        reference_class = reference_norm[mask]
+        candidate_class = candidate_norm[mask]
+        reference_centroid = _l2_normalize(
+            reference_class.mean(axis=0, keepdims=True)
+        )[0]
+        candidate_centroid = _l2_normalize(
+            candidate_class.mean(axis=0, keepdims=True)
+        )[0]
+        within_radius = np.median(
+            np.linalg.norm(reference_class - reference_centroid, axis=1)
+        )
+        displacement = np.linalg.norm(candidate_centroid - reference_centroid)
         per_class.append(
             {
                 "class_id": int(class_id),
                 "n_pairs": int(mask.sum()),
                 "median_paired_cosine": float(np.median(cosine[mask])),
                 "median_relative_l2": float(np.median(relative_l2[mask])),
-                "centroid_cosine": float(np.dot(clean_centroid, recovered_centroid)),
-                "centroid_displacement_over_clean_radius": float(
+                "centroid_cosine": float(
+                    np.dot(reference_centroid, candidate_centroid)
+                ),
+                "centroid_displacement_over_reference_radius": float(
                     displacement / max(within_radius, 1e-12)
                 ),
             }
@@ -601,7 +633,7 @@ def _recovery_metrics(
         "median_paired_cosine": float(np.median(cosine)),
         "mean_paired_cosine": float(np.mean(cosine)),
         "median_relative_l2": float(np.median(relative_l2)),
-        "clean_centroid_agreement": agreement,
+        "reference_centroid_agreement": agreement,
     }
     return summary, per_class
 
@@ -793,116 +825,203 @@ def plot_recovery(args) -> Dict[str, str]:
             raise ValueError("Cannot infer --source; pass 'a' or 'v' explicitly")
     clean_store = ExperimentRecords(Path(args.clean_exp), severity=args.clean_severity)
     missing_store = ExperimentRecords(Path(args.missing_exp), severity=args.missing_severity)
-    clean = clean_store.load_forward(args.clean_corruption, full_only=True)
+
+    if source == "a":
+        observed = "audio"
+        missing = "video"
+        available_mask = "audio_only"
+        missing_ground_truth_key = "Video"
+    else:
+        observed = "video"
+        missing = "audio"
+        available_mask = "video_only"
+        missing_ground_truth_key = "Audio"
+
+    available = missing_store.load_forward(
+        args.missing_corruption, mask_kind=available_mask
+    )
     recovered = missing_store.load_recovered(args.missing_corruption, source)
+    clean_modalities = clean_store.load_full_modalities(args.clean_corruption)
+    missing_ground_truth = clean_modalities[missing_ground_truth_key]
     names, classes, counts = _common_balanced_names(
-        [clean, recovered], args.classes, args.n_classes, args.min_per_class,
+        [available, recovered, missing_ground_truth],
+        args.classes,
+        args.n_classes,
+        args.min_per_class,
         args.max_per_class, args.seed
     )
-    clean = clean.take_names(names)
+    available = available.take_names(names)
     recovered = recovered.take_names(names)
+    missing_ground_truth = missing_ground_truth.take_names(names)
     coords, _, embedding_meta = _joint_embedding(
-        [clean.features, recovered.features], args.seed, args.pca_dim, args.perplexity
+        [available.features, recovered.features, missing_ground_truth.features],
+        args.seed,
+        args.pca_dim,
+        args.perplexity,
     )
-    clean_xy, recovered_xy = coords
-    summary, per_class = _recovery_metrics(clean.features, recovered.features, clean.labels, classes)
+    available_xy, recovered_xy, missing_ground_truth_xy = coords
+    recovery_summary, recovery_per_class = _paired_representation_metrics(
+        missing_ground_truth.features, recovered.features,
+        missing_ground_truth.labels, classes
+    )
+    available_summary, available_per_class = _paired_representation_metrics(
+        missing_ground_truth.features, available.features,
+        missing_ground_truth.labels, classes
+    )
+    recovery_available_summary, recovery_available_per_class = (
+        _paired_representation_metrics(
+            available.features, recovered.features, available.labels, classes
+        )
+    )
     label_names = _read_label_names(Path(args.label_csv) if args.label_csv else None)
 
-    fig, axes = plt.subplots(1, 3, figsize=(12.8, 4.2), sharex=True, sharey=True,
-                             constrained_layout=False)
-    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.13, top=0.76, wspace=0.035)
-    titles = ["Clean full features", "Posterior-mean recovery", "Paired displacement"]
-    for index, ax in enumerate(axes):
-        ax.set_title(titles[index], fontweight="bold", pad=8)
-        _style_axes(ax, show_y=index == 0)
-    legend_handles = []
+    fig, ax = plt.subplots(1, 1, figsize=(8.2, 6.6), constrained_layout=False)
+    fig.subplots_adjust(left=0.10, right=0.985, bottom=0.10, top=0.73)
+    _style_axes(ax, show_y=True)
+
+    state_colors = {
+        "available": "#35618F",
+        "recovered": "#D49A28",
+        "missing_ground_truth": "#D66B37",
+    }
+    class_handles = []
     for class_index, class_id in enumerate(classes):
-        mask = clean.labels == class_id
-        color = PALETTE[class_index]
+        mask = available.labels == class_id
         marker = MARKERS[class_index]
-        axes[0].scatter(clean_xy[mask, 0], clean_xy[mask, 1], s=23, c=color, marker=marker,
-                        alpha=0.78, edgecolors="white", linewidths=0.35, rasterized=True)
-        axes[1].scatter(recovered_xy[mask, 0], recovered_xy[mask, 1], s=23, c=color, marker=marker,
-                        alpha=0.78, edgecolors="white", linewidths=0.35, rasterized=True)
-        legend_handles.append(
-            deps["Line2D"]([0], [0], marker=marker, linestyle="none", markerfacecolor=color,
-                            markeredgecolor="white", markersize=7,
-                            label=_class_text(class_id, label_names))
+        class_indices = np.flatnonzero(mask)[: max(0, args.overlay_pairs_per_class)]
+        for sample_index in class_indices:
+            ax.plot(
+                [recovered_xy[sample_index, 0], missing_ground_truth_xy[sample_index, 0]],
+                [recovered_xy[sample_index, 1], missing_ground_truth_xy[sample_index, 1]],
+                color="#B8C0C8", linewidth=0.55, alpha=0.34, zorder=1,
+            )
+
+        ax.scatter(
+            available_xy[mask, 0], available_xy[mask, 1], s=22,
+            c=state_colors["available"], marker=marker, alpha=0.55,
+            edgecolors="white", linewidths=0.30, rasterized=True, zorder=2,
+        )
+        ax.scatter(
+            missing_ground_truth_xy[mask, 0], missing_ground_truth_xy[mask, 1], s=27,
+            c=state_colors["missing_ground_truth"], marker=marker, alpha=0.66,
+            edgecolors="#7D3A22", linewidths=0.35, rasterized=True, zorder=3,
+        )
+        ax.scatter(
+            recovered_xy[mask, 0], recovered_xy[mask, 1], s=34,
+            facecolors="none", edgecolors=state_colors["recovered"], marker=marker,
+            linewidths=0.95, rasterized=True, zorder=4,
+        )
+        class_handles.append(
+            deps["Line2D"](
+                [0], [0], marker=marker, linestyle="none",
+                markerfacecolor="#6C7680", markeredgecolor="white",
+                markersize=6.5, label=_class_text(class_id, label_names),
+            )
         )
 
-        class_indices = np.flatnonzero(mask)[: args.overlay_pairs_per_class]
-        for sample_index in class_indices:
-            axes[2].plot(
-                [clean_xy[sample_index, 0], recovered_xy[sample_index, 0]],
-                [clean_xy[sample_index, 1], recovered_xy[sample_index, 1]],
-                color="#AAB2BA", linewidth=0.55, alpha=0.48, zorder=1,
-            )
-        axes[2].scatter(
-            clean_xy[class_indices, 0], clean_xy[class_indices, 1], s=25,
-            facecolors="none", edgecolors=color, marker="o", linewidths=0.8, zorder=2,
-        )
-        axes[2].scatter(
-            recovered_xy[class_indices, 0], recovered_xy[class_indices, 1], s=24,
-            c=color, marker="x", linewidths=0.9, zorder=3,
-        )
     state_handles = [
-        deps["Line2D"]([0], [0], marker="o", linestyle="none", markerfacecolor="none",
-                        markeredgecolor="#39434D", markersize=6, label="Clean"),
-        deps["Line2D"]([0], [0], marker="x", linestyle="none", color="#39434D",
-                        markersize=6, label="Recovered"),
+        deps["Line2D"](
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=state_colors["available"], markeredgecolor="white",
+            markersize=7, label=f"Available ({observed})",
+        ),
+        deps["Line2D"](
+            [0], [0], marker="o", linestyle="none", markerfacecolor="none",
+            markeredgecolor=state_colors["recovered"], markeredgewidth=1.2,
+            markersize=7, label="Posterior-mean recovery (fused F)",
+        ),
+        deps["Line2D"](
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=state_colors["missing_ground_truth"],
+            markeredgecolor="#7D3A22", markersize=7,
+            label=f"Missing-modality ground truth ({missing})",
+        ),
     ]
-    axes[2].legend(handles=state_handles, loc="lower right", frameon=True,
-                   facecolor="white", edgecolor="#D7DCE1")
-    axes[1].text(
+    representation_legend = fig.legend(
+        handles=state_handles, loc="upper center", bbox_to_anchor=(0.5, 0.875),
+        ncol=3, frameon=False, title="Representation",
+    )
+    fig.add_artist(representation_legend)
+    fig.legend(
+        handles=class_handles, loc="upper center", bbox_to_anchor=(0.5, 0.805),
+        ncol=min(len(classes), 4), frameon=False, title="Class",
+    )
+    ax.text(
         0.02, 0.02,
-        f"median paired cosine {summary['median_paired_cosine']:.3f}\n"
-        f"clean-centroid agreement {summary['clean_centroid_agreement']:.3f}",
-        transform=axes[1].transAxes, va="bottom", ha="left", fontsize=7.5,
+        f"Recovery ↔ missing GT median cosine "
+        f"{recovery_summary['median_paired_cosine']:.3f}\n"
+        f"Missing-GT centroid agreement "
+        f"{recovery_summary['reference_centroid_agreement']:.3f}",
+        transform=ax.transAxes, va="bottom", ha="left", fontsize=8,
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#CCD3DA", alpha=0.92),
     )
-    observed = "audio" if source == "a" else "video"
-    missing = "video" if source == "a" else "audio"
-    fig.suptitle(args.title or "Recovered and clean fused-feature distributions",
+    fig.suptitle(
+        args.title or "Available, recovered, and missing-modality representations",
                  fontweight="bold", y=0.985)
     fig.text(
         0.5, 0.935,
-        f"{args.missing_corruption} | observed {observed}, missing {missing} | "
-        f"{len(classes)} classes | {len(names)} exact sample pairs",
+        f"{args.missing_corruption} | available {observed}, missing {missing} | "
+        f"joint embedding | {len(classes)} classes | {len(names)} exact sample triplets",
         ha="center", va="top", fontsize=8.5, color="#5F6B76",
     )
-    fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 0.875),
-               ncol=min(len(classes), 4), frameon=False)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     name = args.name or f"tsne_recovery_{args.missing_corruption}"
     png, pdf = _save_figure(fig, output_dir, name)
     plt.close(fig)
     point_rows: List[Dict[str, Any]] = []
-    for state, coordinate in (("clean", clean_xy), ("recovered", recovered_xy)):
-        for sample_name, class_id, xy in zip(names, clean.labels, coordinate):
+    for state, role, coordinate in (
+        ("available", f"observed_{observed}_only", available_xy),
+        ("recovered", "posterior_mean_fused_F", recovered_xy),
+        ("missing_ground_truth", f"clean_{missing}_modality", missing_ground_truth_xy),
+    ):
+        for sample_name, class_id, xy in zip(names, available.labels, coordinate):
             point_rows.append(
                 {"state": state, "corruption": args.missing_corruption,
+                 "representation_role": role,
                  "sample_name": sample_name, "class_id": int(class_id),
                  "tsne_1": float(xy[0]), "tsne_2": float(xy[1])}
             )
     _write_csv(output_dir / f"{name}_points.csv", point_rows)
-    _write_csv(output_dir / f"{name}_metrics.csv", [{"scope": "overall", **summary}] + [
-        {"scope": "class", **row} for row in per_class
-    ])
+    metric_rows: List[Dict[str, Any]] = []
+    for comparison, summary, per_class in (
+        ("recovery_to_missing_ground_truth", recovery_summary, recovery_per_class),
+        ("available_to_missing_ground_truth", available_summary, available_per_class),
+        ("recovery_to_available", recovery_available_summary, recovery_available_per_class),
+    ):
+        metric_rows.append({"comparison": comparison, "scope": "overall", **summary})
+        metric_rows.extend(
+            {"comparison": comparison, "scope": "class", **row}
+            for row in per_class
+        )
+    _write_csv(output_dir / f"{name}_metrics.csv", metric_rows)
     _write_json(
         output_dir / f"{name}_manifest.json",
         {
-            "figure": "missing_recovery_fidelity",
+            "figure": "available_recovery_missing_ground_truth_joint_embedding",
             "clean_experiment": str(clean_store.exp_dir),
             "missing_experiment": str(missing_store.exp_dir),
             "clean_corruption": args.clean_corruption,
             "missing_corruption": args.missing_corruption,
             "recovery_source": source,
+            "available_modality": observed,
+            "available_mask": available_mask,
+            "missing_modality": missing,
+            "missing_ground_truth_feature": (
+                f"clean forward_results.{missing_ground_truth_key.lower()} "
+                f"for the exact matched sample_name"
+            ),
             "recovery_summary": "posterior mean of saved class-conditional recovered features",
             "recovery_formula": "einsum('bk,bkd->bd', alpha, cond_means)",
             "classifier_note": (
                 "The archived classifier marginalizes GDA scores evaluated at each conditional "
                 "mean; it does not directly classify this single posterior-mean vector."
+            ),
+            "semantic_caveat": (
+                "The recovered vector is in fused feature space F, whereas missing-modality "
+                "ground truth is the clean modality-specific ca/cv representation. The joint "
+                "plot visualizes their geometry but must not be described as direct recovery "
+                "of a modality-specific vector."
             ),
             "warmup_samples_skipped": recovered.metadata["warmup_samples_skipped"],
             "selected_classes": classes,
@@ -910,7 +1029,7 @@ def plot_recovery(args) -> Dict[str, str]:
             "sample_count_by_class": counts,
             "selected_sample_names": names,
             "embedding": embedding_meta,
-            "selection_rule": "largest exact-pair class support, then class id",
+            "selection_rule": "largest exact-triplet class support, then class id",
             "quantitative_metrics_space": "original feature space after row normalization where noted",
         },
     )
@@ -1056,7 +1175,11 @@ def build_parser() -> argparse.ArgumentParser:
     corruption.set_defaults(handler=plot_corruption)
 
     recovery = subparsers.add_parser(
-        "recovery", help="Compare expected recovered features with exact clean pairs"
+        "recovery",
+        help=(
+            "Jointly plot available, posterior-mean recovered, and exact "
+            "missing-modality ground-truth representations"
+        ),
     )
     recovery.add_argument("--clean-exp", required=True)
     recovery.add_argument("--missing-exp", required=True)
@@ -1066,7 +1189,13 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Observed source modality; inferred from missing_a/missing_v")
     recovery.add_argument("--clean-severity", type=int)
     recovery.add_argument("--missing-severity", type=int)
-    recovery.add_argument("--overlay-pairs-per-class", type=int, default=12)
+    recovery.add_argument(
+        "--overlay-pairs-per-class", type=int, default=6,
+        help=(
+            "draw this many faint recovery-to-missing-GT pair lines per class; "
+            "use 0 to disable"
+        ),
+    )
     _add_selection_arguments(recovery, default_classes=4)
     recovery.set_defaults(handler=plot_recovery)
 

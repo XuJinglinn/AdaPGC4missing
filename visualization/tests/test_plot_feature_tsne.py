@@ -258,23 +258,51 @@ class EndToEndRenderTests(unittest.TestCase):
 
         records = missing_exp / "recovered_features_records"
         corruption = "missing_a_0.70"
-        rel = f"{corruption}/batch_00000_x2f_v.pt"
+        recovery_rel = f"{corruption}/batch_00000_x2f_v.pt"
+        forward_rel = f"{corruption}/batch_00000_forward_results.pt"
         alpha = np.full((len(self.names), self.n_classes), 0.02, dtype=np.float32)
         alpha[np.arange(len(self.names)), self.labels] = 0.94
         cond_means = np.repeat(self.clean_features[:, None, :], self.n_classes, axis=1)
         cond_means += self.rng.normal(scale=0.18, size=cond_means.shape)
         write_pickle(
-            records / rel,
+            records / recovery_rel,
             {"sample_names": self.names, "source": "v", "warmup_fallback": False,
              "alpha": alpha, "cond_means": cond_means.astype(np.float32)},
+        )
+        available_features = self.clean_features + self.rng.normal(
+            scale=0.65, size=self.clean_features.shape
+        )
+        selected = np.ones(len(self.names), dtype=bool)
+        write_pickle(
+            records / forward_rel,
+            {
+                "sample_names": self.names,
+                "feat": available_features.astype(np.float32),
+                "ca": None,
+                "cv": None,
+                "full_sample_names": [],
+                "mask": {
+                    "full": ~selected,
+                    "audio_only": ~selected,
+                    "video_only": selected,
+                    "both_missing": ~selected,
+                },
+            },
         )
         write_csv(
             records / "index.csv",
             ["corruption", "batch_index", "record_type", "source", "num_samples",
              "warmup_fallback", "file"],
-            [{"corruption": corruption, "batch_index": 0, "record_type": "predict_x2f",
-              "source": "v", "num_samples": len(self.names), "warmup_fallback": False,
-              "file": rel}],
+            [
+                {"corruption": corruption, "batch_index": 0,
+                 "record_type": "forward_results", "source": "all",
+                 "num_samples": len(self.names), "warmup_fallback": "",
+                 "file": forward_rel},
+                {"corruption": corruption, "batch_index": 0,
+                 "record_type": "predict_x2f", "source": "v",
+                 "num_samples": len(self.names), "warmup_fallback": False,
+                 "file": recovery_rel},
+            ],
         )
         self._write_predictions(missing_exp, corruption, 5)
 
@@ -310,6 +338,16 @@ class EndToEndRenderTests(unittest.TestCase):
             with Image.open(result["png"]) as image:
                 self.assertGreaterEqual(image.width, 2000)
                 self.assertGreaterEqual(image.height, 900)
+
+        with (self.output / "qa_recovery_points.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            point_rows = list(csv.DictReader(handle))
+        self.assertEqual(
+            {row["state"] for row in point_rows},
+            {"available", "recovered", "missing_ground_truth"},
+        )
+        self.assertEqual(len(point_rows), 3 * 4 * 14)
 
 
 if __name__ == "__main__":

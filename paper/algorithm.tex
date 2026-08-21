@@ -1,0 +1,112 @@
+% Required packages: amsmath, amssymb, bm, algorithm, algpseudocode
+% Define \methodname before inputting this file if a different name is desired.
+\providecommand{\methodname}{AdaPGC+}
+
+\begin{algorithm}[t]
+\caption{Online Adaptation Procedure of \methodname}
+\label{alg:adapgc}
+\begin{algorithmic}[1]
+\Require Incoming minibatch
+$\mathcal{B}_t=\{(x_i^a,x_i^v)\}_{i=1}^{B}$;
+pretrained model $f_{\theta}$ and its EMA copy $f_{\bar\theta}$;
+online Gaussian models $\{\mathcal{G}_a,\mathcal{G}_v,\mathcal{G}_F\}$;
+cross-view statistics $\{\bm\Sigma^{aF},\bm\Sigma^{vF}\}$;
+hyperparameters $T,\beta,\gamma,\lambda_g,\lambda_c$.
+\Ensure Predictions $\{\widehat y_i\}_{i=1}^{B}$ and updated model/statistics.
+
+\State Extract network logits, representations, and availability masks:
+\Statex \hfill
+$\{\bm s_i,\bm z_i^a,\bm z_i^v,\bm z_i^F,
+m_i\}_{i=1}^{B}\gets f_{\theta}(\mathcal{B}_t)$,
+$m_i\in\{F,a,v\}$.
+
+\State Compute soft assignments
+$\bm q_i\gets\operatorname{softmax}(\bm s_i)$.
+
+\State Update the sufficient statistics of each available Gaussian model:
+\Statex
+\[
+\Delta N_c=\sum_i q_{ic},\qquad
+\Delta\bm S_c=\sum_iq_{ic}\bm z_i,\qquad
+\Delta\bm Q_c=\sum_iq_{ic}\bm z_i\bm z_i^{\top}.
+\]
+
+\State For fully observed samples, update
+$\bm\Sigma_c^{aF}=\operatorname{Cov}(\bm z^a,\bm z^F\mid c)$ and
+$\bm\Sigma_c^{vF}=\operatorname{Cov}(\bm z^v,\bm z^F\mid c)$.
+
+\For{each sample $i\in\mathcal{B}_t$}
+  \If{$m_i=F$}
+    \State Set probabilistic guidance
+    $\bm g_i\gets\mathcal{G}_F(\bm z_i^F)$.
+  \Else
+    \State Let $m\in\{a,v\}$ be the observed modality.
+    \If{paired full-view samples are insufficient}
+      \State Use the safe fallback
+      $\bm g_i\gets\mathcal{G}_m(\bm z_i^m)$.
+    \Else
+      \State Compute observed-view responsibilities:
+      \Statex \hfill
+      $\alpha_{ic}^{m}\gets
+      \operatorname{softmax}\!\left(\mathcal{G}_m(\bm z_i^m)/T\right)_c$.
+      \State Recover a class-conditional fused mean for every class $c$:
+      \Statex
+      \[
+      \widehat{\bm z}_{ic}^{F\mid m}\gets
+      \bm\mu_c^F+(\bm\Sigma_c^{mF})^{\top}
+      (\bm\Sigma_c^m)^{-1}(\bm z_i^m-\bm\mu_c^m).
+      \]
+      \State Marginalize the recovered fused scores:
+      \Statex \hfill
+      $\bm g_{i,m\rightarrow F}\gets
+      \sum_{c=1}^{C}\alpha_{ic}^{m}
+      \mathcal{G}_F(\widehat{\bm z}_{ic}^{F\mid m})$.
+      \State Fuse direct and recovered guidance:
+      \Statex \hfill
+      $\bm g_i\gets(1-\beta)\bm g_{i,m\rightarrow F}
+      +\beta\mathcal{G}_m(\bm z_i^m)$.
+    \EndIf
+  \EndIf
+\EndFor
+
+\State Compute the probabilistic guidance loss:
+\Statex
+\[
+\mathcal{L}_g\gets-\frac{1}{B}\sum_{i=1}^{B}
+\operatorname{softmax}(\bm g_i)^{\top}
+\log\operatorname{softmax}(\bm s_i).
+\]
+
+\State For each fully observed sample, measure unimodal reliability:
+\Statex \hfill
+$D_i^m\gets\operatorname{SKL}
+(\mathcal{G}_F(\bm z_i^F),\mathcal{G}_m(\bm z_i^m))$,
+$m\in\{a,v\}$.
+
+\State Select the reliable modality
+$r_i\gets\arg\min_{m\in\{a,v\}}D_i^m$ and let $u_i$ be the other modality.
+
+\State Compute the one-sided alignment loss:
+\Statex
+\[
+\mathcal{L}_c\gets-\frac{1}{|\mathcal{I}_F|}
+\sum_{i\in\mathcal{I}_F}
+\log\frac{
+\exp(\operatorname{sim}(\bm z_i^{u_i},
+\operatorname{sg}(\bm z_i^{r_i}))/\tau)}{
+\sum_j\exp(\operatorname{sim}(\bm z_i^{u_i},
+\operatorname{sg}(\bm z_j^{r_i}))/\tau)}.
+\]
+
+\State Update fusion-attention parameters with $\lambda_g\mathcal{L}_g$;
+update LayerNorm parameters with $\lambda_c\mathcal{L}_c$;
+update $\bar\theta$ by EMA.
+
+\State Re-evaluate the batch with $f_{\bar\theta}$ and predict:
+\Statex \hfill
+$\widetilde{\bm s}_i\gets\bm s_{\bar\theta}(x_i)+\gamma\bm g_i$,
+$\widehat y_i\gets\arg\max_c\widetilde s_{ic}$.
+
+\State \Return $\{\widehat y_i\}_{i=1}^{B}$, $\theta$, $\bar\theta$, and the updated online statistics.
+\end{algorithmic}
+\end{algorithm}

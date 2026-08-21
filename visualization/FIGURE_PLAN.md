@@ -34,8 +34,9 @@ use one canonical corruption from each stream and state the choice explicitly.
 
 ## Figure 2 — recovery fidelity under single-modality missingness
 
-- **Question:** Does the recovered fused representation follow the real/full
-  fused-feature distribution for the same semantic classes?
+- **Question:** For the same partially missing samples, how are the available
+  representation, posterior-mean recovery, and clean missing-modality ground
+  truth arranged in a common feature geometry?
 - **Visualized recovery summary:**
   `z_posterior_mean = sum_c alpha[c] * cond_means[c]`. This is the posterior
   mean of the saved class-conditional recovered fused features. The classifier
@@ -43,22 +44,30 @@ use one canonical corruption from each stream and state the choice explicitly.
   vector forward, so the figure must call it a posterior-mean recovery, not an
   internal feature used verbatim by the classifier. The script does **not** use
   the ground-truth label to select a conditional mean.
-- **Reference:** The clean/full `feat` for the same `sample_name`, loaded from a
-  clean experiment directory.
+- **Available:** The missing run's `feat` selected by `audio_only` or
+  `video_only` mask.
+- **Reference:** Clean `ca` for missing audio or clean `cv` for missing video,
+  matched by the exact same `sample_name`.
 - **Default selection:** Four classes with the largest number of exact
-  clean/recovered pairs; balanced sampling within class.
-- **Visual:** Clean distribution, recovered distribution, and a restrained
-  paired overlay. The overlay draws only a small deterministic subset of pair
-  lines, so it remains readable.
+  available/recovered/missing-GT triplets; balanced sampling within class.
+- **Visual:** One joint t-SNE panel. Representation is encoded by explicit
+  color/fill and class by marker shape. Only a small deterministic subset of
+  recovery-to-missing-GT pair lines is drawn.
 - **Quantitative guardrail:** paired cosine similarity, relative L2 error,
-  recovered-to-clean-centroid agreement, and class-centroid displacement are
-  computed before t-SNE.
+  reference-centroid agreement, and class-centroid displacement are computed
+  before t-SNE for all three pairwise representation comparisons.
 - **Exclusion:** Warm-up fallback records have no conditional recovered feature
   and are reported but never silently plotted as recovered features.
 
 Recommended main-paper conditions: one `missing_a_*` and one `missing_v_*`
 condition at the same missing ratio. The default recommendation is 0.70 when it
-was collected; use exactly these two panels rather than every missing ratio.
+was collected; generate one overlay for each missing direction rather than every
+missing ratio.
+
+**Semantic caveat:** `cond_means` predicts fused feature space `F`; clean
+missing-modality ground truth is modality-specific `ca`/`cv`. This plot supports
+a feature-geometry/alignment statement, not literal reconstruction of a saved
+modality-specific vector.
 
 ## Supplementary Figure S1 — modality-to-fused geometry
 
